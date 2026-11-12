@@ -224,65 +224,51 @@ local renderConn = RunService.RenderStepped:Connect(function(dt)
 end)
 
 ------------------------------------------------------------------------
--- no recoil: hookfunction approach for Skorpio Engine
--- overwrites the Recoil() upvalue references so shove() receives zero
+-- no recoil
+-- SE_Client kicks the camera through SpringModule tables: u11 (cam) and
+-- u10 (viewmodel), both via spring:shove(). shove is a per-table closure,
+-- so we find every spring in the GC and wrap shove to drop the impulse.
 ------------------------------------------------------------------------
 
-local recoilHookConn = nil
+local hookedSprings = setmetatable({}, { __mode = "k" })
 
-local function startNoRecoilHook()
-    if recoilHookConn then return end
-    -- method: each frame, find all SpringModule instances and zero their position
-    -- more reliable: hookfunction the spring's shove if the executor supports it
-    -- fallback: we use a Heartbeat connection that fires after Recoil()
-    -- and counteracts the camera rotation it applied
-
-    local lastCamCF = nil
-    local shooting  = false
-
-    -- detect shooting: MB1 held
-    recoilHookConn = RunService.Heartbeat:Connect(function()
-        if not Settings.NoRecoil then return end
-
-        local mb1 = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-        if not mb1 then
-            shooting = false
-            lastCamCF = nil
-            return
-        end
-
-        if not shooting then
-            -- first frame of firing: snapshot the camera
-            lastCamCF = Camera.CFrame
-            shooting = true
-            return
-        end
-
-        -- while shooting: if aimbot is NOT active, lock camera pitch/yaw
-        -- if aimbot IS active, the aimbot lerp already handles aim
-        if not (Settings.Aimbot and aimTarget) then
-            if lastCamCF then
-                -- preserve the camera's position but restore the orientation
-                -- this strips the recoil rotation the engine applied this frame
-                local pos = Camera.CFrame.Position
-                Camera.CFrame = CFrame.new(pos) * (lastCamCF - lastCamCF.Position)
-            end
-        end
-
-        -- update snapshot so slow drift still works (prevents jarring snap)
-        -- allow tiny fraction of natural movement through
-        lastCamCF = Camera.CFrame
-    end)
+local function isSkorpioSpring(t)
+    return type(rawget(t, "shove")) == "function"
+        and type(rawget(t, "update")) == "function"
+        and typeof(rawget(t, "Target")) == "Vector3"
+        and typeof(rawget(t, "Velocity")) == "Vector3"
+        and rawget(t, "Damping") ~= nil
 end
 
-local function stopNoRecoilHook()
-    if recoilHookConn then
-        recoilHookConn:Disconnect()
-        recoilHookConn = nil
+local function hookSprings()
+    for _, t in ipairs(getgc(true)) do
+        if type(t) == "table" and not hookedSprings[t] and isSkorpioSpring(t) then
+            local original = rawget(t, "shove")
+            hookedSprings[t] = original
+            rawset(t, "shove", function(self, impulse, ...)
+                if Settings.NoRecoil then return end
+                return original(self, impulse, ...)
+            end)
+        end
     end
 end
 
-startNoRecoilHook()
+-- springs are rebuilt when SE_Client re-runs on respawn, so rescan
+local recoilScanAlive = true
+task.spawn(function()
+    while recoilScanAlive do
+        pcall(hookSprings)
+        task.wait(2)
+    end
+end)
+
+local function stopNoRecoilHook()
+    recoilScanAlive = false
+    for t, original in pairs(hookedSprings) do
+        rawset(t, "shove", original)
+    end
+    table.clear(hookedSprings)
+end
 
 ------------------------------------------------------------------------
 -- menu
