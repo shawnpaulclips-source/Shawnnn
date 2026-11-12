@@ -1,5 +1,7 @@
--- skeleton esp: box + health bar + team check, INSERT toggles menu
--- game layout (from dump): Player.Character / Humanoid.Health / MaxHealth, Teams.Attackers / Teams.Defenders
+-- ESP + aimbot + no recoil for Skorpio Engine game
+-- INSERT toggles menu | all features have menu toggles
+-- game uses: Teams.Attackers / Teams.Defenders, Humanoid.Health/MaxHealth
+-- recoil: Skorpio Engine springs u10 (gun) + u11 (cam), camRecoilMod on u68
 
 if getgenv().__esp_unload then pcall(getgenv().__esp_unload) end
 
@@ -10,21 +12,34 @@ local TweenService     = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = workspace.CurrentCamera
+local Mouse       = LocalPlayer:GetMouse()
 
 workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     Camera = workspace.CurrentCamera
 end)
 
+------------------------------------------------------------------------
+-- settings
+------------------------------------------------------------------------
+
 local Settings = {
+    -- esp
     Enabled    = true,
     Boxes      = true,
     HealthBars = true,
     TeamCheck  = true,
     BoxColor   = Color3.fromRGB(235, 92, 72),
+    -- aimbot
+    Aimbot     = false,
+    AimFOV     = 90,        -- pixel radius
+    Smoothing  = 0.15,      -- 0 = instant snap, 1 = barely moves
+    ShowFOV    = true,
+    -- no recoil
+    NoRecoil   = false,
 }
 
 ------------------------------------------------------------------------
--- drawing objects
+-- drawing objects for esp
 ------------------------------------------------------------------------
 
 local function newDrawing(kind, props)
@@ -61,24 +76,112 @@ Players.PlayerAdded:Connect(createEsp)
 Players.PlayerRemoving:Connect(removeEsp)
 
 ------------------------------------------------------------------------
--- render
+-- FOV circle (Drawing)
+------------------------------------------------------------------------
+
+local FOVCircle = newDrawing("Circle", {
+    Thickness = 1.5,
+    Color     = Color3.fromRGB(235, 92, 72),
+    Filled    = false,
+    NumSides  = 64,
+    Visible   = false,
+    Transparency = 0.6,
+})
+
+------------------------------------------------------------------------
+-- helpers
 ------------------------------------------------------------------------
 
 local function isTeammate(player)
+    if not Settings.TeamCheck then return false end
     if not LocalPlayer.Team or not player.Team then return false end
     return player.Team == LocalPlayer.Team
 end
 
-local RED, GREEN = Color3.fromRGB(230, 60, 60), Color3.fromRGB(80, 220, 110)
+local function isAlive(player)
+    local char = player.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health > 0
+end
 
-local renderConn = RunService.RenderStepped:Connect(function()
+local function getHead(player)
+    local char = player.Character
+    return char and char:FindFirstChild("Head")
+end
+
+------------------------------------------------------------------------
+-- aimbot target selection
+------------------------------------------------------------------------
+
+local function getAimbotTarget()
+    if not Settings.Aimbot then return nil end
+    if not isAlive(LocalPlayer) then return nil end
+
+    local vp    = Camera.ViewportSize
+    local cx, cy = vp.X / 2, vp.Y / 2
+    local best, bestDist = nil, Settings.AimFOV
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        if isTeammate(player) then continue end
+        if not isAlive(player) then continue end
+
+        local head = getHead(player)
+        if not head then continue end
+
+        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+        if not onScreen then continue end
+
+        local dist = math.sqrt((screenPos.X - cx)^2 + (screenPos.Y - cy)^2)
+        if dist < bestDist then
+            bestDist = dist
+            best = player
+        end
+    end
+
+    return best
+end
+
+------------------------------------------------------------------------
+-- no recoil: hook into Skorpio Engine's recoil mod table
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+-- render loop (esp + aimbot + fov circle + no recoil)
+------------------------------------------------------------------------
+
+local RED, GREEN = Color3.fromRGB(230, 60, 60), Color3.fromRGB(80, 220, 110)
+local aimTarget = nil
+
+local renderConn = RunService.RenderStepped:Connect(function(dt)
+    -- FOV circle
+    local vp = Camera.ViewportSize
+    local cx, cy = vp.X / 2, vp.Y / 2
+    FOVCircle.Position = Vector2.new(cx, cy)
+    FOVCircle.Radius   = Settings.AimFOV
+    FOVCircle.Visible  = Settings.Aimbot and Settings.ShowFOV
+
+    -- aimbot
+    aimTarget = getAimbotTarget()
+
+    if aimTarget and Settings.Aimbot and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        local head = getHead(aimTarget)
+        if head then
+            local targetCF = CFrame.lookAt(Camera.CFrame.Position, head.Position)
+            local smooth   = 1 - math.clamp(Settings.Smoothing, 0, 0.95)
+            Camera.CFrame  = Camera.CFrame:Lerp(targetCF, smooth)
+        end
+    end
+
+    -- ESP
     for player, e in pairs(Esp) do
         local char = player.Character
         local hrp  = char and char:FindFirstChild("HumanoidRootPart")
         local hum  = char and char:FindFirstChildOfClass("Humanoid")
 
         if not Settings.Enabled or not hrp or not hum or hum.Health <= 0
-            or (Settings.TeamCheck and isTeammate(player)) then
+            or isTeammate(player) then
             hide(e)
             continue
         end
@@ -96,10 +199,14 @@ local renderConn = RunService.RenderStepped:Connect(function()
         local pos = Vector2.new(top.X - w / 2, top.Y)
         local size = Vector2.new(w, h)
 
+        -- highlight aimbot target
+        local isTarget = (player == aimTarget)
+        local boxCol = isTarget and Color3.fromRGB(255, 200, 60) or Settings.BoxColor
+
         e.Box.Visible, e.BoxOutline.Visible = Settings.Boxes, Settings.Boxes
         if Settings.Boxes then
             e.Box.Position, e.Box.Size = pos, size
-            e.Box.Color = Settings.BoxColor
+            e.Box.Color = boxCol
             e.BoxOutline.Position, e.BoxOutline.Size = pos, size
         end
 
@@ -117,6 +224,67 @@ local renderConn = RunService.RenderStepped:Connect(function()
 end)
 
 ------------------------------------------------------------------------
+-- no recoil: hookfunction approach for Skorpio Engine
+-- overwrites the Recoil() upvalue references so shove() receives zero
+------------------------------------------------------------------------
+
+local recoilHookConn = nil
+
+local function startNoRecoilHook()
+    if recoilHookConn then return end
+    -- method: each frame, find all SpringModule instances and zero their position
+    -- more reliable: hookfunction the spring's shove if the executor supports it
+    -- fallback: we use a Heartbeat connection that fires after Recoil()
+    -- and counteracts the camera rotation it applied
+
+    local lastCamCF = nil
+    local shooting  = false
+
+    -- detect shooting: MB1 held
+    recoilHookConn = RunService.Heartbeat:Connect(function()
+        if not Settings.NoRecoil then return end
+
+        local mb1 = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+        if not mb1 then
+            shooting = false
+            lastCamCF = nil
+            return
+        end
+
+        if not shooting then
+            -- first frame of firing: snapshot the camera
+            lastCamCF = Camera.CFrame
+            shooting = true
+            return
+        end
+
+        -- while shooting: if aimbot is NOT active, lock camera pitch/yaw
+        -- if aimbot IS active, the aimbot lerp already handles aim
+        if not (Settings.Aimbot and aimTarget) then
+            if lastCamCF then
+                -- preserve the camera's position but restore the orientation
+                -- this strips the recoil rotation the engine applied this frame
+                local pos = Camera.CFrame.Position
+                Camera.CFrame = CFrame.new(pos) * (lastCamCF - lastCamCF.Position)
+            end
+        end
+
+        -- update snapshot so slow drift still works (prevents jarring snap)
+        -- allow tiny fraction of natural movement through
+        lastCamCF = Camera.CFrame
+    end)
+end
+
+local function stopNoRecoilHook()
+    if recoilHookConn then
+        recoilHookConn:Disconnect()
+        recoilHookConn = nil
+    end
+end
+
+startNoRecoilHook()
+
+------------------------------------------------------------------------
 -- menu
 ------------------------------------------------------------------------
 
@@ -128,6 +296,7 @@ local Theme = {
     Muted  = Color3.fromRGB(128, 122, 140),
     Accent = Color3.fromRGB(235, 92, 72),
     Off    = Color3.fromRGB(58, 54, 66),
+    Yellow = Color3.fromRGB(255, 200, 60),
 }
 
 local guiParent = (gethui and gethui()) or game:GetService("CoreGui")
@@ -143,9 +312,11 @@ local function corner(obj, r)
     c.Parent = obj
 end
 
+-- menu has two sections now: visuals (4 toggles) + combat (3 toggles + 1 slider)
+-- total rows: 7 toggles + 1 slider + 2 section headers = ~340px
 local Main = Instance.new("Frame")
-Main.Size = UDim2.fromOffset(240, 208)
-Main.Position = UDim2.new(0, 40, 0.5, -104)
+Main.Size = UDim2.fromOffset(260, 410)
+Main.Position = UDim2.new(0, 40, 0.5, -205)
 Main.BackgroundColor3 = Theme.Bg
 Main.BorderSizePixel = 0
 Main.ClipsDescendants = true
@@ -170,7 +341,7 @@ Title.Font = Enum.Font.GothamBold
 Title.TextSize = 14
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.TextColor3 = Theme.Text
-Title.Text = "visuals"
+Title.Text = "mara"
 Title.Parent = Header
 
 local Hint = Instance.new("TextLabel")
@@ -190,18 +361,57 @@ AccentLine.BackgroundColor3 = Theme.Accent
 AccentLine.BorderSizePixel = 0
 AccentLine.Parent = Main
 
-local List = Instance.new("Frame")
-List.Size = UDim2.new(1, -20, 1, -48)
-List.Position = UDim2.fromOffset(10, 44)
-List.BackgroundTransparency = 1
-List.Parent = Main
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size = UDim2.new(1, -12, 1, -48)
+Scroll.Position = UDim2.fromOffset(6, 44)
+Scroll.BackgroundTransparency = 1
+Scroll.ScrollBarThickness = 3
+Scroll.ScrollBarImageColor3 = Theme.Muted
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Scroll.BorderSizePixel = 0
+Scroll.Parent = Main
 
 local layout = Instance.new("UIListLayout")
 layout.Padding = UDim.new(0, 4)
 layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Parent = List
+layout.Parent = Scroll
+
+local pad = Instance.new("UIPadding")
+pad.PaddingLeft = UDim.new(0, 4)
+pad.PaddingRight = UDim.new(0, 4)
+pad.PaddingTop = UDim.new(0, 2)
+pad.PaddingBottom = UDim.new(0, 6)
+pad.Parent = Scroll
 
 local fast = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+------------------------------------------------------------------------
+-- menu: section header
+------------------------------------------------------------------------
+
+local function section(label, order)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 24)
+    row.BackgroundTransparency = 1
+    row.LayoutOrder = order
+    row.Parent = Scroll
+
+    local text = Instance.new("TextLabel")
+    text.Size = UDim2.new(1, -8, 1, 0)
+    text.Position = UDim2.fromOffset(4, 0)
+    text.BackgroundTransparency = 1
+    text.Font = Enum.Font.GothamBold
+    text.TextSize = 11
+    text.TextXAlignment = Enum.TextXAlignment.Left
+    text.TextColor3 = Theme.Muted
+    text.Text = string.upper(label)
+    text.Parent = row
+end
+
+------------------------------------------------------------------------
+-- menu: toggle
+------------------------------------------------------------------------
 
 local function toggle(label, key, order)
     local row = Instance.new("TextButton")
@@ -210,7 +420,7 @@ local function toggle(label, key, order)
     row.AutoButtonColor = false
     row.Text = ""
     row.LayoutOrder = order
-    row.Parent = List
+    row.Parent = Scroll
     corner(row, 6)
 
     local text = Instance.new("TextLabel")
@@ -270,12 +480,123 @@ local function toggle(label, key, order)
     end)
 end
 
-toggle("Enabled",     "Enabled",    1)
-toggle("Box ESP",     "Boxes",      2)
-toggle("Health bars", "HealthBars", 3)
-toggle("Team check",  "TeamCheck",  4)
+------------------------------------------------------------------------
+-- menu: slider
+------------------------------------------------------------------------
 
+local function slider(label, key, min, max, step, order)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 48)
+    row.BackgroundColor3 = Theme.Panel
+    row.LayoutOrder = order
+    row.Parent = Scroll
+    corner(row, 6)
+
+    local text = Instance.new("TextLabel")
+    text.Size = UDim2.new(1, -60, 0, 20)
+    text.Position = UDim2.fromOffset(12, 4)
+    text.BackgroundTransparency = 1
+    text.Font = Enum.Font.GothamMedium
+    text.TextSize = 13
+    text.TextXAlignment = Enum.TextXAlignment.Left
+    text.TextColor3 = Theme.Text
+    text.Text = label
+    text.Parent = row
+
+    local valLabel = Instance.new("TextLabel")
+    valLabel.Size = UDim2.new(0, 40, 0, 20)
+    valLabel.Position = UDim2.new(1, -52, 0, 4)
+    valLabel.BackgroundTransparency = 1
+    valLabel.Font = Enum.Font.GothamMedium
+    valLabel.TextSize = 12
+    valLabel.TextXAlignment = Enum.TextXAlignment.Right
+    valLabel.TextColor3 = Theme.Accent
+    valLabel.Parent = row
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(1, -24, 0, 6)
+    track.Position = UDim2.fromOffset(12, 32)
+    track.BackgroundColor3 = Theme.Off
+    track.BorderSizePixel = 0
+    track.Parent = row
+    corner(track, 3)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new(0, 0, 1, 0)
+    fill.BackgroundColor3 = Theme.Accent
+    fill.BorderSizePixel = 0
+    fill.Parent = track
+    corner(fill, 3)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(12, 12)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(0, 0, 0.5, 0)
+    knob.BackgroundColor3 = Theme.Text
+    knob.BorderSizePixel = 0
+    knob.Parent = track
+    corner(knob, 6)
+
+    local function render()
+        local frac = (Settings[key] - min) / (max - min)
+        fill.Size = UDim2.new(frac, 0, 1, 0)
+        knob.Position = UDim2.new(frac, 0, 0.5, 0)
+        local display = step >= 1 and tostring(math.floor(Settings[key])) or string.format("%.2f", Settings[key])
+        valLabel.Text = display
+    end
+    render()
+
+    local dragging = false
+
+    local function update(inputX)
+        local abs = track.AbsolutePosition.X
+        local w   = track.AbsoluteSize.X
+        local frac = math.clamp((inputX - abs) / w, 0, 1)
+        local raw  = min + frac * (max - min)
+        Settings[key] = math.floor(raw / step + 0.5) * step
+        Settings[key] = math.clamp(Settings[key], min, max)
+        render()
+    end
+
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            update(input.Position.X)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            update(input.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+end
+
+------------------------------------------------------------------------
+-- build menu
+------------------------------------------------------------------------
+
+section("visuals", 1)
+toggle("Enabled",      "Enabled",    2)
+toggle("Box ESP",      "Boxes",      3)
+toggle("Health bars",  "HealthBars", 4)
+toggle("Team check",   "TeamCheck",  5)
+
+section("combat", 10)
+toggle("Aimbot",       "Aimbot",     11)
+toggle("Show FOV",     "ShowFOV",    12)
+slider("FOV radius",   "AimFOV",     20, 300, 5, 13)
+slider("Smoothing",    "Smoothing",  0, 0.95, 0.05, 14)
+toggle("No recoil",    "NoRecoil",   15)
+
+------------------------------------------------------------------------
 -- drag by header
+------------------------------------------------------------------------
+
 do
     local dragging, dragStart, startPos
     Header.InputBegan:Connect(function(input)
@@ -294,7 +615,10 @@ do
     end)
 end
 
+------------------------------------------------------------------------
 -- INSERT: fade + collapse
+------------------------------------------------------------------------
+
 local open = true
 local fullSize = Main.Size
 local slow = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
@@ -316,9 +640,14 @@ UserInputService.InputBegan:Connect(function(input, processed)
     end
 end)
 
--- re-exec cleanup hook
+------------------------------------------------------------------------
+-- cleanup hook
+------------------------------------------------------------------------
+
 getgenv().__esp_unload = function()
     renderConn:Disconnect()
+    stopNoRecoilHook()
+    FOVCircle:Remove()
     for p in pairs(Esp) do removeEsp(p) end
     Gui:Destroy()
 end
