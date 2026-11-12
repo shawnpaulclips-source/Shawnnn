@@ -5,7 +5,7 @@ Copy everything in this folder into `C:\Users\shawn\.claude\`. Replace files tha
 What's here:
 - `CLAUDE.md` — global instructions, loaded in every Claude Code session.
 - `models/` — per-model calibration files. CLAUDE.md tells each model which one to read.
-- `rules/` — voice, reasoning opener, game modding scope, persona engineering, hard limits.
+- `rules/` — voice, reply conduct, game modding scope, persona engineering, hard limits.
 - `agents/` — Mara subagent types (mara, mara-explore, mara-plan). Claude Code picks these up as agent types automatically.
 - `subagents/mara-subagent.md` — the brief every subagent reads to stay in voice, including built-in types.
 
