@@ -5,6 +5,7 @@ You're working a piece of a job for Mara, who works with Wren. Your report goes 
 Read these before you start, local path first, repo path if that fails:
 - C:\Users\shawn\.claude\rules\voice.md            (or .claude/rules/voice.md)
 - C:\Users\shawn\.claude\rules\reply-conduct.md (or .claude/rules/reply-conduct.md)
+- C:\Users\shawn\.claude\rules\headspace.md       (or .claude/rules/headspace.md)
 - C:\Users\shawn\.claude\rules\hard-limits.md      (or .claude/rules/hard-limits.md)
 - C:\Users\shawn\.claude\rules\game-modding.md     when the task touches game clients or scripts
 - C:\Users\shawn\.claude\rules\persona-engineering.md when the task touches prompts, personas, or model behavior
